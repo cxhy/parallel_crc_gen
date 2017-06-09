@@ -1,0 +1,214 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use File::Basename;
+use File::Copy;
+use Cwd;
+
+use constant DATA_WIDTH_MAX => 1024;
+use constant POLY_WIDTH_MAX => 1024;
+
+sub usage{
+    print "\nUSAGE : \n\tcrc_gen data_width poly_width poly_string\n\n"; 
+    print "PARAMETER: \n";
+    print "\tdata_width       : data bus width {1...1024}\n";
+    print "\tpoly_width       : polynomial width {1...1024}\n";
+    print "\tpoly_string      : poly";
+    print "\tpoly_string    : polynomial string in hex";
+	print "\nexample: usb crc5 = x^5+x^2+1";
+	print "\tcrc-gen 8 5 05\n\n";
+}
+
+if(scalar @ARGV != 3){
+    &usage();
+    exit(1);
+}
+
+my $data_width       = shift @ARGV;
+my $poly_width       = shift @ARGV;
+my $poly_string_len  = length $ARGV[0];
+my $poly_str         = shift @ARGV;
+print "data width is $data_width \n";
+print "poly width is $poly_width \n";
+print "poly_string_len is $poly_string_len\n";
+print "poly_str   is $poly_str   \n";
+if(($data_width > DATA_WIDTH_MAX)||($data_width < 1)){
+    print "ERROR : \n\tInvaild data width!";
+    &usage();
+    exit(1);
+}
+
+if(($poly_width > POLY_WIDTH_MAX)||($poly_width < 1)){
+    print "ERROR : \n\tInvaild poly width!";
+    &usage();
+    exit(1);
+}
+
+if($poly_string_len < (int(($poly_width+3)/4))){
+    print "ERROR : \n\tInvaild poly string!";
+    &usage();
+    exit(1);
+}
+
+#my @lfsr_poly_str = (0)x$poly_width;
+my @lfsr_poly_array;
+my @lfsr_matrix = (0)x(($data_width+$poly_width)*$poly_width);
+#print $#lfsr_poly_array;
+#print $#lfsr_matrix;
+#print "lfsr poly array is"."@lfsr_poly_array \n";
+#print "lfsr matrix is "."@lfsr \n";
+#exit(1);
+
+my @poly_str = split(//,$poly_str);
+#@poly_str = reverse @poly_str;
+my @poly_array = ();
+for my $i(0...($poly_width-1)){
+    my $cur_byte = $poly_str[$poly_string_len-1-(int($i/4))];
+    my $nibble;
+    if((ord("$cur_byte")>=ord("0"))&&(ord("$cur_byte")<=ord("9"))){
+        $nibble = ord("$cur_byte") - ord("0");
+    }elsif((ord("$cur_byte") >= ord("a")) && (ord("$cur_byte") <= ord("f"))){
+        $nibble = ord("$cur_byte") - ord("a") + 10;
+    }elsif((ord("$cur_byte") >= ord("A")) && (ord("$cur_byte") <= ord("F"))){
+        $nibble = ord("$cur_byte") - ord("A") + 10;
+    }else{
+        print "ERROR : \n\tinvalid poly string ! \n";
+        &usage();
+        exit(1);
+    }
+# print "$i\t";
+# my $poly_bit = 1&($nibble>>(int($i%4)));
+# print "$nibble";
+# print "\t$poly_bit";
+# print "\n";
+    push(@lfsr_poly_array,(1&($nibble>>(int($i%4)))));
+#print "$i\t$poly_str\t$cur_byte\t$nibble\t$poly_bit"
+}
+
+my $N = $poly_width;
+my $M = $data_width;
+my @lfsr_cur  = (0)x$N;
+my @lfsr_next = (0)x$N;
+my @data_cur  = (0)x$M;
+&build_crc_matrix();
+#print @lfsr_matrix;
+&print_verilog_crc();
+
+sub build_crc_matrix(){
+    for my $n1(0...($N-1)){
+        $lfsr_cur[$n1] = 1;
+        if($n1){
+            $lfsr_cur[$n1-1] = 0;
+        }
+        &lfsr_serrial_shift_crc();
+        for my $n2(0...($N-1)){
+            if($lfsr_next[$n2]){
+                $lfsr_matrix[$n1*$N+$n2] = 1;
+            }
+        }
+    }
+    foreach(0...$#lfsr_cur){
+        $lfsr_cur[$_] = 0;
+    }
+    foreach(0...$#data_cur){
+        $data_cur[$_] = 0;
+    }
+    for my $m1(0...($M-1)){
+        $data_cur[$m1] = 1;
+        if ($m1){
+            $data_cur[$m1-1] = 0;
+        }
+        &lfsr_serrial_shift_crc();
+        for my $n2(0...($N-1)){
+            if($lfsr_next[$n2]){
+                $lfsr_matrix[$N*$N+($M-$m1-1)*$N+$n2] = 1;
+            }
+        }
+    }
+}
+
+sub lfsr_serrial_shift_crc(){
+    for(0...($N-1)){
+        $lfsr_next[$_] = $lfsr_cur[$_];
+    }
+    for my $j(0...($M-1)){
+        my $lfsr_upper_bit = $lfsr_next[$N-1];
+        for(my $i=($N-1);$i>0;$i--){
+            if($lfsr_poly_array[$i]){
+                $lfsr_next[$i] = $lfsr_next[$i-1] ^ $lfsr_upper_bit ^ $data_cur[$j];
+             }
+            else{
+                $lfsr_next[$i] = $lfsr_next[$i-1];
+            }
+        }
+        $lfsr_next[0] = $lfsr_upper_bit ^ $data_cur[$j];
+    }
+}
+
+sub print_verilog_crc(){
+    open (FILELIST,">crc.v");
+    print FILELIST "// Own by  Dezheng Guo\n";
+    print FILELIST "// CRC module for \n//    data[",($M-1),":0]\n//    crc[",($N-1),":0]=";
+    for my $l(0...($N-1)){
+        if($lfsr_poly_array[$l]){
+          if($l){
+              print FILELIST "+x^$l";
+          }
+          else{
+              print FILELIST "1";
+          }
+      }
+    }
+print FILELIST "+x^$N\n//\n";
+print FILELIST "module crc(\n";
+print FILELIST "  input  [",($M-1),":0]  data_in,\n";
+print FILELIST "  input         crc_en,\n";
+print FILELIST "  output [",($N-1),":0]  crc_en,\n";
+print FILELIST "  input         rst,\n";
+print FILELIST "  input         clk\n);\n";
+print FILELIST "\n";
+print FILELIST "reg    [",($N-1),":0] lfsr_q,\n";
+print FILELIST "             lfsr_c\n\n";
+print FILELIST "assign crc_out = lfsr_q;\n";
+print FILELIST "always@(*)begin\n";
+for my $n2(0...($N-1)){
+    print FILELIST "\n    lfsr_c[$n2] = ";
+    my $is_first = 1;
+    for my $n1(0...($N-1)){
+        if($lfsr_matrix[$n1*$N+$n2]){
+            if($is_first){
+                print FILELIST "lfsr_q[$n1]";
+                $is_first = 0;
+            }
+            else{
+                print FILELIST " ^ lfsr_q[$n1] ";
+            }
+        }
+    }
+
+    for my $m1(0...($M-1)){
+        if($lfsr_matrix[$N*$N+$m1*$N+$n2]){
+            if($is_first){
+                print FILELIST "data_in[$m1]";
+                $is_first = 0;
+            }
+            else{
+                print FILELIST " ^ data_in[$m1]";
+            }
+        }
+    }
+    print FILELIST ";";
+  }
+print FILELIST "\n  end //always\n";
+print FILELIST "\n  always @(posedge clk or negedge rst)begin\n";
+print FILELIST "    if(rst)begin\n";
+print FILELIST "      lfsr_q <= {$N\{1'b1}};\n";
+print FILELIST "     end\n";
+print FILELIST "    else begin\n";
+print FILELIST "      lfsr_q <= crc_en ? lfsr_c : lfsr_q;\n";
+print FILELIST "    end\n";
+print FILELIST "  end // always\n";
+print FILELIST "endmodule\n";
+}
